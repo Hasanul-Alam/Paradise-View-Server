@@ -1,252 +1,253 @@
 const express = require("express");
-const app = express();
-const PORT = process.env.PORT || 3000;
 const cors = require("cors");
 const { MongoClient, ObjectId } = require("mongodb");
 require("dotenv").config();
+
+const app = express();
+const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
+// Validate environment variables
+if (!process.env.DB_USER || !process.env.DB_PASS) {
+  console.error("Missing DB_USER or DB_PASS in environment variables.");
+  process.exit(1);
+}
+
+// MongoDB connection
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.uvq0yvv.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 const client = new MongoClient(uri);
 
 async function run() {
   try {
     await client.connect();
-    const database = client.db("Paradise-View");
-    const bookingsCollection = database.collection("bookings");
-    const roomsCollection = database.collection("rooms");
-    const usersCollection = database.collection("users");
-    const reviewCollection = database.collection("reviews");
-    const newslettersCollection = database.collection("newsletters");
+    console.log("Connected to MongoDB");
 
-    // Check room availability route
-    app.post("/check-availability", async (req, res) => {
-      const { roomType, checkInDate, checkOutDate, rooms } = req.body;
+    const db = client.db("Paradise-View");
+    const bookingsCollection = db.collection("bookings");
+    const roomsCollection = db.collection("rooms");
+    const usersCollection = db.collection("users");
+    const reviewsCollection = db.collection("reviews");
+    const newslettersCollection = db.collection("newsletters");
 
-      // Find room details from rooms collection
-      const room = await roomsCollection.findOne({ type: roomType });
-      if (!room) {
-        return res.status(404).json({ message: "Room type not found" });
+    // Helper function for error handling
+    const withErrorHandling = (handler) => async (req, res) => {
+      try {
+        await handler(req, res);
+      } catch (error) {
+        console.error("Error occurred:", error);
+        res.status(500).json({ error: "Internal Server Error" });
       }
+    };
 
-      const totalAvailableRooms = room.totalRooms;
+    // Routes
 
-      // Find bookings that overlap the requested dates
-      const overlappingBookings = await bookingsCollection
-        .find({
-          roomType,
-          $or: [
-            {
-              startDate: { $lte: checkOutDate },
-              endDate: { $gte: checkInDate },
-            },
-          ],
-        })
-        .toArray();
-      console.log(overlappingBookings);
+    // Room availability
+    app.post(
+      "/check-availability",
+      withErrorHandling(async (req, res) => {
+        const { roomType, checkInDate, checkOutDate, rooms } = req.body;
+        const room = await roomsCollection.findOne({ type: roomType });
 
-      // Calculate already booked rooms during this period
-      const bookedRooms = overlappingBookings.reduce((total, booking) => {
-        return total + booking.roomsBooked;
-      }, 0);
-      // console.log(bookedRooms)
+        if (!room) {
+          return res.status(404).json({ message: "Room type not found" });
+        }
 
-      // Check availability
-      const availableRooms = totalAvailableRooms - bookedRooms;
-      if (availableRooms >= rooms) {
-        res.json({ available: true });
-      } else {
-        res.json({ available: false });
-      }
-    });
+        const totalAvailableRooms = room.totalRooms;
 
-    // Book room route
-    app.post("/book-room", async (req, res) => {
-      const {
-        email,
-        roomType,
-        roomsBooked,
-        numOfPersons,
-        startDate,
-        endDate,
-        status,
-      } = req.body;
+        const overlappingBookings = await bookingsCollection
+          .find({
+            roomType,
+            $or: [
+              { startDate: { $lte: checkOutDate }, endDate: { $gte: checkInDate } },
+            ],
+          })
+          .toArray();
 
-      // Insert the booking into the bookings collection
-      const booking = {
-        email,
-        roomType,
-        roomsBooked,
-        numOfPersons,
-        startDate,
-        endDate,
-        status,
-      };
+        const bookedRooms = overlappingBookings.reduce(
+          (total, booking) => total + booking.roomsBooked,
+          0
+        );
 
-      const result = await bookingsCollection.insertOne(booking);
-      res.json({
-        success: true,
-        message: "Booking successful",
-        bookingId: result.insertedId,
-      });
-    });
+        const availableRooms = totalAvailableRooms - bookedRooms;
+        res.json({ available: availableRooms >= rooms });
+      })
+    );
 
-    // Get bookings by email
-    app.get("/bookings/:email", async (req, res) => {
-      const email = req.params.email;
-      const query = { email: email };
-      const cursor = await bookingsCollection.find(query).toArray();
-      res.send(cursor);
-    });
+    // Book room
+    app.post(
+      "/book-room",
+      withErrorHandling(async (req, res) => {
+        const booking = req.body;
+        const result = await bookingsCollection.insertOne(booking);
+        res.json({
+          success: true,
+          message: "Booking successful",
+          bookingId: result.insertedId,
+        });
+      })
+    );
 
-    // Delete booking by id
-    app.delete("/bookings/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await bookingsCollection.deleteOne(query);
-      res.send(result);
-    });
-
-    // Post user data
-    app.post("/users", async (req, res) => {
-      const user = req.body;
-      const result = await usersCollection.insertOne(user);
-      res.send(result);
-    });
-
-    // Post user review
-    app.post("/reviews", async (req, res) => {
-      const data = req.body;
-      const result = await reviewCollection.insertOne(data);
-      res.send(result);
-    });
-    // Get reviews by email
-    app.get("/reviews/:email", async (req, res) => {
-      const email = req.params.email;
-      const query = { email: email };
-      const cursor = await reviewCollection.find(query).toArray();
-      res.send(cursor);
-    });
-
-    // Get all users
-    app.get("/users", async (req, res) => {
-      const cursor = await usersCollection.find({}).toArray();
-      res.send(cursor);
-    });
-
-    // Get user by email
-    app.get("/users/:email", async (req, res) => {
-      const email = req.params.email;
-      const query = { email: email };
-      const cursor = await usersCollection.find(query).toArray();
-      res.send(cursor);
-    });
-
-    // Update user role by id
-    app.patch("/users/:id", async (req, res) => {
-      const id = req.params.id;
-      const data = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: data,
-      };
-      const result = await usersCollection.updateOne(filter, updateDoc);
-      res.send(result);
-    });
-
-    // Delete User
-    app.delete("/users/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await usersCollection.deleteOne(query);
-      res.send(result);
-    });
-
-    // Get all rooms
-    app.get("/rooms", async (req, res) => {
-      const cursor = await roomsCollection.find({}).toArray();
-      res.send(cursor);
-    });
-
-    // Post room
-    app.post("/rooms", async (req, res) => {
-      const data = req.body;
-      const cursor = await roomsCollection.insertOne(data);
-      res.send(cursor);
-    });
-
-    // Get single room by id
-    app.get("/rooms/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await roomsCollection.find(query).toArray();
-      res.send(result);
-    });
-
-    // Update room data
-    app.patch("/rooms/:id", async (req, res) => {
-      const id = req.params.id;
-      const data = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: data,
-      };
-      const result = await roomsCollection.updateOne(filter, updateDoc);
-      res.send(result);
-    });
-
-    // Delete Room Data
-    app.delete("/rooms/:id", async (req, res) => {
-      const id = req.params.id;
-      const query = { _id: new ObjectId(id) };
-      const result = await roomsCollection.deleteOne(query);
-      res.send(result);
-    });
-
-    // Get all bookings
-    app.get("/bookings", async (req, res) => {
-      const cursor = await bookingsCollection.find({}).toArray();
-      res.send(cursor);
-    });
+    // Get all bookings or by email
+    app.get(
+      "/bookings/:email?",
+      withErrorHandling(async (req, res) => {
+        const query = req.params.email ? { email: req.params.email } : {};
+        const bookings = await bookingsCollection.find(query).toArray();
+        res.json(bookings);
+      })
+    );
 
     // Update booking status
-    app.patch("/bookings/:id", async (req, res) => {
-      const id = req.params.id;
-      // const isConfirmed = req.body.isConfirmed;
-      const data = req.body;
-      const filter = { _id: new ObjectId(id) };
-      const updateDoc = {
-        $set: data,
-      };
-      const result = await bookingsCollection.updateOne(filter, updateDoc);
-      res.send(result);
-    });
+    app.patch(
+      "/bookings/:id",
+      withErrorHandling(async (req, res) => {
+        const { id } = req.params;
+        const updateData = req.body;
+        const result = await bookingsCollection.updateOne(
+          { _id: new ObjectId(id) },
+          { $set: updateData }
+        );
+        res.json(result);
+      })
+    );
 
-    // Post newsletter
-    app.post("/newsletters", async (req, res) => {
-      const data = req.body;
-      const result = await newslettersCollection.insertOne(data);
-      res.send(result);
-    });
+    // Delete booking
+    app.delete(
+      "/bookings/:id",
+      withErrorHandling(async (req, res) => {
+        const result = await bookingsCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.json(result);
+      })
+    );
 
-    // get all newsletters
-    app.get("/newsletters", async (req, res) => {
-      const cursor = await newslettersCollection.find({}).toArray();
-      res.send(cursor);
-    });
+    // Users
+    app.post(
+      "/users",
+      withErrorHandling(async (req, res) => {
+        const result = await usersCollection.insertOne(req.body);
+        res.json(result);
+      })
+    );
+
+    app.get(
+      "/users/:email?",
+      withErrorHandling(async (req, res) => {
+        const query = req.params.email ? { email: req.params.email } : {};
+        const users = await usersCollection.find(query).toArray();
+        res.json(users);
+      })
+    );
+
+    app.patch(
+      "/users/:id",
+      withErrorHandling(async (req, res) => {
+        const result = await usersCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: req.body }
+        );
+        res.json(result);
+      })
+    );
+
+    app.delete(
+      "/users/:id",
+      withErrorHandling(async (req, res) => {
+        const result = await usersCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.json(result);
+      })
+    );
+
+    // Reviews
+    app.post(
+      "/reviews",
+      withErrorHandling(async (req, res) => {
+        const result = await reviewsCollection.insertOne(req.body);
+        res.json(result);
+      })
+    );
+
+    app.get(
+      "/reviews/:email?",
+      withErrorHandling(async (req, res) => {
+        const query = req.params.email ? { email: req.params.email } : {};
+        const reviews = await reviewsCollection.find(query).toArray();
+        res.json(reviews);
+      })
+    );
+
+    // Rooms
+    app.get(
+      "/rooms/:id?",
+      withErrorHandling(async (req, res) => {
+        const query = req.params.id ? { _id: new ObjectId(req.params.id) } : {};
+        const rooms = await roomsCollection.find(query).toArray();
+        res.json(rooms);
+      })
+    );
+
+    app.post(
+      "/rooms",
+      withErrorHandling(async (req, res) => {
+        const result = await roomsCollection.insertOne(req.body);
+        res.json(result);
+      })
+    );
+
+    app.patch(
+      "/rooms/:id",
+      withErrorHandling(async (req, res) => {
+        const result = await roomsCollection.updateOne(
+          { _id: new ObjectId(req.params.id) },
+          { $set: req.body }
+        );
+        res.json(result);
+      })
+    );
+
+    app.delete(
+      "/rooms/:id",
+      withErrorHandling(async (req, res) => {
+        const result = await roomsCollection.deleteOne({
+          _id: new ObjectId(req.params.id),
+        });
+        res.json(result);
+      })
+    );
+
+    // Newsletters
+    app.post(
+      "/newsletters",
+      withErrorHandling(async (req, res) => {
+        const result = await newslettersCollection.insertOne(req.body);
+        res.json(result);
+      })
+    );
+
+    app.get(
+      "/newsletters",
+      withErrorHandling(async (req, res) => {
+        const newsletters = await newslettersCollection.find({}).toArray();
+        res.json(newsletters);
+      })
+    );
   } finally {
-    // Ensures that the client will close when you finish/error
+    // Close the database connection if needed
     // await client.close();
   }
 }
-run().catch(console.dir);
 
-// Home route
+// Initialize server
+run().catch((error) => console.error("Failed to start server:", error));
+
 app.get("/", (req, res) => {
-  res.send("Hello World!");
+  res.send("Hello, Paradise-View API!");
 });
 
 app.listen(PORT, () => {
